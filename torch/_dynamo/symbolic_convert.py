@@ -95,7 +95,11 @@ from .funcname_cache import get_funcname
 from .guards import GuardBuilder, install_guard
 from .output_graph import GraphCompileReason, OutputGraph
 from .replay_record import DummyModule, ExecutionRecorder
-from .resume_execution import ContinueExecutionCache, ReenterWith
+from .resume_execution import (
+    ContinueExecutionCache,
+    IS_TRACING_RESUME_PROLOGUE_VARNAME,
+    ReenterWith,
+)
 from .source import (
     AttrSource,
     DictGetItemSource,
@@ -107,6 +111,7 @@ from .source import (
 )
 from .trace_rules import is_builtin_constant, is_forbidden
 from .utils import (
+    _get_error_on_graph_break,
     counters,
     get_fake_value,
     get_instruction_source_311,
@@ -822,10 +827,13 @@ def generic_jump(truth_fn: typing.Callable[[object], bool], push: bool):
                     self.jump(inst)
             else:
                 unimplemented_v2(
-                    gb_type=_gb_type,
+                    gb_type="Data-dependent branching",
                     context=f"attempted to jump with {value}",
                     explanation=_explanation,
-                    hints=_hints,
+                    hints=[
+                        *graph_break_hints.FUNDAMENTAL,
+                        "Use `torch.cond` to express dynamic control flow.",
+                    ],
                 )
 
     return inner
@@ -1247,7 +1255,7 @@ class InstructionTranslatorBase(
 
     def step(self):
         """Process exactly one instruction, return False we should exit"""
-        self.error_on_graph_break = config.error_on_graph_break
+        self.error_on_graph_break = _get_error_on_graph_break()
 
         ip = self.instruction_pointer
         if ip is None:
@@ -1473,6 +1481,10 @@ class InstructionTranslatorBase(
         loaded_vt = self.pop()
         loaded_vt.set_name_hint(name)
         self.symbolic_locals[name] = loaded_vt
+        if name == IS_TRACING_RESUME_PROLOGUE_VARNAME:
+            val = loaded_vt.as_python_constant()
+            assert type(val) is bool
+            self.is_tracing_resume_prologue = val
 
     def DELETE_FAST(self, inst):
         del self.symbolic_locals[inst.argval]
@@ -3256,12 +3268,14 @@ class InstructionTranslatorBase(
         self.export = export
         # NOTE: one_graph is used for export/debugging to always force errors on graph breaks.
         # To toggle fullgraph during normal compile, self.error_on_graph_break
-        # is used instead. Every step(), its value is updated to config.error_on_graph_break.
-        # We mirror this value since cleanup may (correctly) inadvertently change config.error_on_graph_break.
-        # This assumes that we cannot both trace a change to config.error_on_graph_break and graph break on
+        # is used instead. Every step(), its value is updated to the global tls.error_on_graph_break.
+        # We mirror this value since cleanup may (correctly) inadvertently change tls.error_on_graph_break.
+        # This assumes that we cannot both trace a change to tls.error_on_graph_break and graph break on
         # the same instruction.
         self.one_graph = False
         self.error_on_graph_break = False
+        # Also do not graph break when tracing resume function prologues
+        self.is_tracing_resume_prologue = False
 
         self.current_speculation = None
 
@@ -3526,6 +3540,7 @@ class InstructionTranslator(InstructionTranslatorBase):
             all(b.can_restore() for b in self.block_stack)
             and not self.one_graph
             and not self.error_on_graph_break
+            and not self.is_tracing_resume_prologue
             and not self.active_generic_context_managers
         )
 
@@ -3661,6 +3676,7 @@ class InstructionTranslator(InstructionTranslatorBase):
             and not self.export
             and not self.one_graph
             and not self.error_on_graph_break
+            and not self.is_tracing_resume_prologue
         ):
             raise exc.SkipFrame("because no content in function call")
 

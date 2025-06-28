@@ -325,11 +325,6 @@ skip_torchrec = True
 # Don't apply most trace_rules.py rules
 dont_skip_tracing = False
 
-# If True, enforce fullgraph=True - raise errors on graph break
-# NOTE: do not set manually - this is modified internally by Dynamo.
-# Use the fullgraph option of torch.compile instead.
-error_on_graph_break = False
-
 # No longer used
 optimize_ddp_lazy_compile = False
 
@@ -403,7 +398,7 @@ use_numpy_random_stream = False
 enable_cpp_guard_manager = True
 
 # Use C++ guard manager for symbolic shapes
-enable_cpp_symbolic_shape_guards = False
+enable_cpp_symbolic_shape_guards = not is_fbcode()
 
 # Enable tracing through contextlib.contextmanager
 enable_trace_contextlib = True
